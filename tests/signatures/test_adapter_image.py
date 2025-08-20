@@ -445,6 +445,41 @@ def test_pdf_from_file():
             pass
 
 
+def test_dict_input_with_images():
+    """Test dictionary input fields containing dspy.Image objects"""
+
+    class MixedContentSignature(dspy.Signature):
+        mixed_data: dict = dspy.InputField(desc="Dictionary containing images and other data")
+        analysis: str = dspy.OutputField(desc="Analysis of the mixed content")
+
+    # Create mixed content dictionary with Images
+    mixed_input = {
+        "text_field": "Sample text content",
+        "image_field": dspy.Image.from_url("https://example.com/dog.jpg", download=False),
+        "number_field": 42,
+        "nested_dict": {
+            "inner_text": "Nested text",
+            "inner_image": dspy.Image.from_url("https://example.com/cat.jpg", download=False),
+        },
+    }
+
+    predictor, lm = setup_predictor(MixedContentSignature, {"analysis": "Mixed content analyzed successfully"})
+
+    # Execute prediction with mixed content
+    result = predictor(mixed_data=mixed_input)
+
+    # Verify prediction succeeded
+    assert result.analysis == "Mixed content analyzed successfully"
+
+    # Verify that both Images were properly converted to image_url format in LM messages
+    assert count_messages_with_image_url_pattern(lm.history[-1]["messages"]) == 2
+
+    # Verify the actual image URLs are present in the messages
+    messages_str = str(lm.history[-1]["messages"])
+    assert "https://example.com/dog.jpg" in messages_str
+    assert "https://example.com/cat.jpg" in messages_str
+
+
 def test_image_repr():
     """Test string representation of Image objects"""
     url_image = dspy.Image.from_url("https://example.com/dog.jpg", download=False)
