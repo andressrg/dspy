@@ -35,15 +35,9 @@ def wrap_program(program: dspy.Module, metric: Callable):
             print(e)
 
         # Include the `example` in the output for subsequent usage in buckets/strategies.
-        return {
-            "prediction": prediction,
-            "trace": trace,
-            "score": score,
-            "example": example
-        }
+        return {"prediction": prediction, "trace": trace, "score": score, "example": example}
 
     return wrapped_program
-
 
 
 def append_a_demo(demo_input_field_maxlen):
@@ -57,7 +51,12 @@ def append_a_demo(demo_input_field_maxlen):
             predictor, _inputs, _outputs = step
 
             for k, v in _inputs.items():
-                if demo_input_field_maxlen and len(str(v)) > demo_input_field_maxlen:
+                # FIX: Don't truncate dspy.Image objects - preserve them for proper LM processing
+                if isinstance(v, dspy.Image):
+                    # Keep Image objects intact - they need to be processed as structured data, not text
+                    continue
+                elif demo_input_field_maxlen and len(str(v)) > demo_input_field_maxlen:
+                    # Apply truncation only to non-Image inputs
                     _inputs[k] = f"{str(v)[:demo_input_field_maxlen]}\n\t\t... <TRUNCATED FOR BREVITY>"
 
             demo = dspy.Example(augmented=True, **_inputs, **_outputs)
@@ -83,8 +82,10 @@ def append_a_rule(bucket, system, **kwargs):
     example = good["example"]
 
     if good["score"] < batch_10p_score or bad["score"] > batch_90p_score:
-        logger.info(f"Skipping rule generation as good score {good['score']} is below the 10th percentile "
-                    f"*or* bad score {bad['score']} is above the 90th percentile.")
+        logger.info(
+            f"Skipping rule generation as good score {good['score']} is below the 10th percentile "
+            f"*or* bad score {bad['score']} is above the 90th percentile."
+        )
         return False
 
     if good["score"] <= bad["score"]:
@@ -98,12 +99,10 @@ def append_a_rule(bucket, system, **kwargs):
             good["prediction"] = {"N/A": "Prediction not available"}
 
     better_trajectory = [
-        {"module_name": predictor2name[id(p)], "inputs": i, "outputs": dict(o)}
-        for p, i, o in good["trace"]
+        {"module_name": predictor2name[id(p)], "inputs": i, "outputs": dict(o)} for p, i, o in good["trace"]
     ]
     worse_trajectory = [
-        {"module_name": predictor2name[id(p)], "inputs": i, "outputs": dict(o)}
-        for p, i, o in bad["trace"]
+        {"module_name": predictor2name[id(p)], "inputs": i, "outputs": dict(o)} for p, i, o in bad["trace"]
     ]
 
     kwargs = {
@@ -120,8 +119,8 @@ def append_a_rule(bucket, system, **kwargs):
         "module_names": module_names,
     }
 
-    kwargs = {k: v if isinstance(v, str) else ujson.dumps(recursive_mask(v), indent=2)
-              for k, v in kwargs.items()}
+    # MULTIMODAL FIX: Pass objects directly to multimodal OfferFeedback signature
+    # No longer force JSON serialization - let the signature handle complex objects including Images
     advice = dspy.Predict(OfferFeedback)(**kwargs).module_advice
 
     for name, predictor in system.named_predictors():
@@ -131,6 +130,7 @@ def append_a_rule(bucket, system, **kwargs):
             predictor.signature = predictor.signature.with_instructions(instructions)
 
     return True
+
 
 class OfferFeedback(dspy.Signature):
     """
@@ -149,17 +149,17 @@ class OfferFeedback(dspy.Signature):
 
     program_code: str = InputField(desc="The code of the program that we are analyzing")
     modules_defn: str = InputField(desc="The definition of each module in the program, including its I/O")
-    program_inputs: str = InputField(desc="The inputs to the program that we are analyzing")
-    oracle_metadata: str = InputField(desc="Any (hidden) metadata about the training set instance we're analyzing")
-    worse_program_trajectory: str = InputField(
+    program_inputs: dict = InputField(desc="The inputs to the program that we are analyzing")
+    oracle_metadata: dict = InputField(desc="Any (hidden) metadata about the training set instance we're analyzing")
+    worse_program_trajectory: list[dict] = InputField(
         desc="The trajectory of the program's execution, showing each module's I/O"
     )
-    worse_program_outputs: str = InputField(desc="The outputs of the program that we are analyzing")
+    worse_program_outputs: dict = InputField(desc="The outputs of the program that we are analyzing")
     worse_reward_value: float = InputField(desc="The reward value assigned to the program's outputs")
-    better_program_trajectory: str = InputField(
+    better_program_trajectory: list[dict] = InputField(
         desc="The trajectory of the program's execution, showing each module's I/O"
     )
-    better_program_outputs: str = InputField(desc="The outputs of the program that we are analyzing")
+    better_program_outputs: dict = InputField(desc="The outputs of the program that we are analyzing")
     better_reward_value: float = InputField(desc="The reward value assigned to the program's outputs")
     module_names: list[str] = InputField(desc="The names of the modules in the program, for which we seek advice")
     discussion: str = OutputField(desc="Discussing blame of where each module went wrong, if it did")
@@ -192,6 +192,10 @@ def inspect_modules(program):
 
 
 def recursive_mask(o):
+    # MULTIMODAL FIX: Preserve Image objects for multimodal LM processing
+    if isinstance(o, dspy.Image):
+        return o  # Keep Image objects intact - they're needed for visual analysis
+
     # If the object is already serializable, return it.
     try:
         ujson.dumps(o)
