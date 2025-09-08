@@ -353,12 +353,12 @@ def test_default_proposer():
     )
 
 
-def test_general_proposer_formatting():
-    """Test that the general proposer formats examples correctly."""
+def test_verbosity_refined_proposer_formatting():
+    """Test that the verbosity refined proposer formats examples correctly."""
     from dspy.teleprompt.gepa.gepa_utils import ReflectiveExample
-    from dspy.teleprompt.gepa.instruction_proposal import GeneralInstructionProposer
+    from dspy.teleprompt.gepa.instruction_proposal import SingleComponentVerbosityRefinedInstructionProposer
 
-    proposer = GeneralInstructionProposer()
+    proposer = SingleComponentVerbosityRefinedInstructionProposer()
 
     sample_data: list[ReflectiveExample] = [
         {
@@ -395,38 +395,9 @@ def test_general_proposer_formatting():
     assert "### context" in formatted, "Should have nested context headers"
 
 
-def test_dspy_general_proposer_interface():
-    """Test that DSPyGeneralProposer implements ProposalFn interface correctly."""
-    from dspy.teleprompt.gepa.gepa_utils import ReflectiveExample
-    from dspy.teleprompt.gepa.instruction_proposal import DSPyGeneralProposer
-
-    proposer = DSPyGeneralProposer()
-
-    # Test interface compliance
-    candidate = {"answer_module": "Answer the question based on context."}
-    reflective_dataset: dict[str, list[ReflectiveExample]] = {
-        "answer_module": [
-            {
-                "Inputs": {"question": "Test question", "context": "Test context"},
-                "Generated_Outputs": {"answer": "Test answer"},
-                "Feedback": "Test feedback"
-            }
-        ]
-    }
-    components_to_update = ["answer_module"]
-
-    # Should not raise an exception for interface compliance
-    assert callable(proposer), "Proposer should be callable"
-    assert callable(proposer), "Should implement __call__ method"
-
-    # Test simple initialization (matching GEPA core simplicity)
-    proposer2 = DSPyGeneralProposer()
-    assert proposer2.proposer is not None, "Should have proposer module"
-
-
-def test_general_proposer_with_gepa():
-    """Test integration of general proposer with GEPA."""
-    from dspy.teleprompt.gepa.instruction_proposal import DSPyGeneralProposer
+def test_verbosity_refined_proposer_with_gepa():
+    """Test integration of verbosity refined proposer with GEPA."""
+    from dspy.teleprompt.gepa.instruction_proposal import VerbosityRefinedInstructionProposer
 
     student = dspy.Predict("question, context -> answer")
 
@@ -458,9 +429,14 @@ def test_general_proposer_with_gepa():
     dspy.settings.configure(lm=lm)
 
     reflection_lm = DummyLM([
-        {"improved_instruction": "When answering geography questions about capitals, ensure you correctly identify the capital city of the specified country. For European countries, be especially careful to distinguish between different nations."},
-        {"improved_instruction": "Focus on providing accurate geographical knowledge about European capitals. When given a question about a country's capital, provide the correct capital city name."},
-        {"improved_instruction": "Answer geography questions with factual accuracy. Pay attention to the specific country mentioned and provide its correct capital city."}
+        {"reasoning": "Analyzing geography feedback to improve instruction", "improved_instruction": "When answering geography questions about capitals, ensure you correctly identify the capital city of the specified country. For European countries, be especially careful to distinguish between different nations."},
+        {"reasoning": "Focusing on European capital accuracy", "improved_instruction": "Focus on providing accurate geographical knowledge about European capitals. When given a question about a country's capital, provide the correct capital city name."},
+        {"reasoning": "Ensuring factual geographical accuracy", "improved_instruction": "Answer geography questions with factual accuracy. Pay attention to the specific country mentioned and provide its correct capital city."},
+        {"reasoning": "Enhancing geographical knowledge", "improved_instruction": "Provide accurate capital city information for all European countries."},
+        {"reasoning": "Improving geographical accuracy", "improved_instruction": "Ensure correct identification of capital cities for European nations."},
+        {"reasoning": "Optimizing geographical responses", "improved_instruction": "Focus on precise geographical knowledge about European capitals."},
+        {"reasoning": "Refining capital city knowledge", "improved_instruction": "Correctly identify capital cities of European countries."},
+        {"reasoning": "Strengthening geographical accuracy", "improved_instruction": "Provide factual information about European capital cities."}
     ])
 
     # Test with general proposer (simplified interface)
@@ -468,7 +444,66 @@ def test_general_proposer_with_gepa():
         metric=lambda gold, pred, trace=None, pred_name=None, pred_trace=None: 1.0 if pred.answer.lower() in gold.answer.lower() else 0.0,
         max_metric_calls=4,
         reflection_lm=reflection_lm,
-        instruction_proposer=DSPyGeneralProposer()
+        instruction_proposer=VerbosityRefinedInstructionProposer()
+    )
+
+    result = gepa.compile(student, trainset=examples, valset=examples)
+
+    assert result is not None
+    assert len(lm.history) > 0, "Main LM should have been called"
+    assert len(reflection_lm.history) > 0, "Reflection LM should have been called"
+
+
+def test_verbosity_refined_proposer_max_length():
+    """Test integration of verbosity refined proposer with max_length constraint in GEPA."""
+    from dspy.teleprompt.gepa.instruction_proposal import VerbosityRefinedInstructionProposer
+
+    student = dspy.Predict("question, context -> answer")
+
+    examples = [
+        dspy.Example(
+            question="What is the capital of France?",
+            context="France is a country in Europe with a rich history and culture.",
+            answer="Paris"
+        ).with_inputs("question", "context"),
+        dspy.Example(
+            question="What is the capital of Spain?",
+            context="Spain is located in southwestern Europe on the Iberian Peninsula.",
+            answer="Madrid"
+        ).with_inputs("question", "context")
+    ]
+
+    lm = DummyLM([
+        {"answer": "London"},  # Incorrect first
+        {"answer": "Paris"},   # Correct after optimization
+        {"answer": "Barcelona"},  # Incorrect first
+        {"answer": "Madrid"},  # Correct after optimization
+        {"answer": "Berlin"},
+        {"answer": "Rome"},
+        {"answer": "Vienna"},
+        {"answer": "Brussels"},
+        {"answer": "Prague"}
+    ])
+    dspy.settings.configure(lm=lm)
+
+    reflection_lm = DummyLM([
+        # Standard ChainOfThought responses for GenerateImprovedInstruction
+        {"reasoning": "Analyzing feedback with length constraints", "improved_instruction": "Answer geography questions accurately. Focus on capital cities of European countries. Be precise and concise."},
+        {"reasoning": "Compressing instruction for brevity", "improved_instruction": "Identify European capitals correctly."},
+        {"reasoning": "Further refinement needed", "improved_instruction": "Provide accurate European capital cities."},
+        {"reasoning": "Optimizing instruction length", "improved_instruction": "Answer with correct European capitals."},
+        {"reasoning": "Final compression pass", "improved_instruction": "Name the correct capital city."},
+        {"reasoning": "Ensuring accuracy with brevity", "improved_instruction": "Give accurate capital information."},
+        {"reasoning": "Length-aware optimization", "improved_instruction": "Correctly identify capitals."},
+        {"reasoning": "Maintaining accuracy while shortening", "improved_instruction": "Provide correct capitals."},
+    ])
+
+    # Test with max_length constraint (should trigger refinement when needed)
+    gepa = dspy.GEPA(
+        metric=lambda gold, pred, trace=None, pred_name=None, pred_trace=None: 1.0 if pred.answer.lower() in gold.answer.lower() else 0.0,
+        max_metric_calls=4,
+        reflection_lm=reflection_lm,
+        instruction_proposer=VerbosityRefinedInstructionProposer(max_length=50)  # Short limit to test refinement
     )
 
     result = gepa.compile(student, trainset=examples, valset=examples)

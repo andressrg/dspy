@@ -312,6 +312,7 @@ class MultiModalInstructionProposer(ProposalFn):
         return updated_components
 
 
+
 class GenerateImprovedInstruction(dspy.Signature):
     """I provided an assistant with instructions to perform a task for me, but the assistant's performance needs improvement based on the examples and feedback below.
 
@@ -349,20 +350,52 @@ class GenerateImprovedInstruction(dspy.Signature):
     )
 
 
-class GeneralInstructionProposer(dspy.Module):
-    """DSPy-native general instruction proposer.
+class SingleComponentVerbosityRefinedInstructionProposer(dspy.Module):
+    """DSPy-native instruction proposer with verbosity control.
     
-    This module provides an alternative to GEPA's default instruction proposer
-    using DSPy's native patterns while preserving the proven methodology:
+    This module provides length-aware instruction generation using DSPy's native patterns.
+    When max_length is specified, it uses dspy.Refine to iteratively compress instructions
+    that exceed the character limit while preserving essential content.
     
-    Single-step instruction generation that analyzes feedback and generates
-    improved instructions, matching GEPA core's direct approach.
+    Features:
+    - Standard instruction generation for unconstrained cases
+    - Automatic refinement for length-constrained cases using reward-based optimization
+    - Preserves GEPA's proven methodology and formatting
     """
 
-    def __init__(self):
-        """Initialize the proposer with single-step generation (matching GEPA core)."""
+    def __init__(self, max_length: int | None = None):
+        """Initialize the proposer with single-step generation (matching GEPA core).
+        
+        Args:
+            max_length: Maximum character length for compact instructions. If None, uses standard generation.
+        """
         super().__init__()
+        self.max_length = max_length
         self.generate_instruction = dspy.ChainOfThought(GenerateImprovedInstruction)
+
+        if max_length is not None:
+            def max_length_reward(args, pred: dspy.Prediction) -> float:
+                """
+                Reward instructions that are at or below max_length get perfect score.
+
+                Instructions should have the max length while maintaining their main key points.
+                Compaction should be very thoughtful and not lose any important information.
+                """
+                character_count = len(pred.improved_instruction)
+                if character_count <= max_length:
+                    return 1.0  # Perfect score for instructions within limit
+                else:
+                    # Penalize based on how much it exceeds the limit
+                    excess = character_count - max_length
+                    penalty = excess / max_length  # Normalize penalty
+                    return max(0.0, 1.0 - penalty)
+
+            self.generate_instruction = dspy.Refine(
+                self.generate_instruction,
+                N=3,
+                reward_fn=max_length_reward,
+                threshold=1.0,
+            )
 
     def forward(self, current_instruction: str, reflective_dataset: list[ReflectiveExample]) -> str:
         """Generate improved instruction based on current instruction and feedback examples.
@@ -372,17 +405,15 @@ class GeneralInstructionProposer(dspy.Module):
             reflective_dataset: List of examples with inputs, outputs, and feedback
             
         Returns:
-            str: Improved instruction text
+            str: Improved instruction text (compact version if max_length is specified)
         """
         # Format examples using GEPA's proven markdown structure
         formatted_examples = self._format_examples_for_instruction_generation(reflective_dataset)
 
-        # Direct generation (matching GEPA core's single-step approach)
         result = self.generate_instruction(
             current_instruction=current_instruction,
             examples_with_feedback=formatted_examples
         )
-
         return result.improved_instruction
 
     def _format_examples_for_instruction_generation(self, reflective_dataset: list[ReflectiveExample]) -> str:
@@ -429,17 +460,25 @@ class GeneralInstructionProposer(dspy.Module):
         return "\n\n".join(formatted_parts)
 
 
-class DSPyGeneralProposer(ProposalFn):
-    """GEPA-compatible DSPy general instruction proposer.
+class VerbosityRefinedInstructionProposer(ProposalFn):
+    """GEPA-compatible instruction proposer with verbosity refinement.
     
-    This class implements the ProposalFn protocol using DSPy components,
-    providing a native alternative to GEPA's default proposer while maintaining
-    the same single-step methodology and proven effectiveness.
+    This class implements the ProposalFn protocol with optional length constraints.
+    Provides DSPy-native instruction generation with automatic refinement for length control.
+    
+    Features:
+    - Optional max_length parameter for verbosity control
+    - Maintains single-step methodology when no constraints
+    - Uses dspy.Refine for intelligent compression when needed
     """
 
-    def __init__(self):
-        """Initialize the proposer (matching GEPA core's simplicity)."""
-        self.proposer = GeneralInstructionProposer()
+    def __init__(self, max_length: int | None = None):
+        """Initialize the proposer (matching GEPA core's simplicity).
+        
+        Args:
+            max_length: Maximum character length for generated instructions. If None, no length constraint.
+        """
+        self.proposer = SingleComponentVerbosityRefinedInstructionProposer(max_length=max_length)
 
     def __call__(
         self,
@@ -447,8 +486,7 @@ class DSPyGeneralProposer(ProposalFn):
         reflective_dataset: dict[str, list[ReflectiveExample]],
         components_to_update: list[str],
     ) -> dict[str, str]:
-        """GEPA-compatible proposal function.
-        
+        """
         Args:
             candidate: Current component name -> instruction mapping
             reflective_dataset: Component name -> list of reflective examples  
