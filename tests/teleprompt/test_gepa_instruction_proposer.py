@@ -351,3 +351,128 @@ def test_default_proposer():
     assert images_in_history.has_text_serialized_images, (
         "Expected to find serialized images (CUSTOM-TYPE-START-IDENTIFIER)"
     )
+
+
+def test_general_proposer_formatting():
+    """Test that the general proposer formats examples correctly."""
+    from dspy.teleprompt.gepa.gepa_utils import ReflectiveExample
+    from dspy.teleprompt.gepa.instruction_proposal import GeneralInstructionProposer
+
+    proposer = GeneralInstructionProposer()
+
+    sample_data: list[ReflectiveExample] = [
+        {
+            "Inputs": {
+                "question": "What is the capital of France?",
+                "context": "France is a country in Europe."
+            },
+            "Generated_Outputs": {
+                "answer": "London"
+            },
+            "Feedback": "Incorrect. The capital of France is Paris, not London."
+        },
+        {
+            "Inputs": {
+                "question": "What is the capital of Spain?",
+                "context": "Spain is located in southwestern Europe."
+            },
+            "Generated_Outputs": {
+                "answer": "Madrid"
+            },
+            "Feedback": "Correct! Madrid is indeed the capital of Spain."
+        }
+    ]
+
+    formatted = proposer._format_examples_for_instruction_generation(sample_data)
+
+    # Check for GEPA-compatible structure
+    assert "# Example 1" in formatted, "Should have example headers"
+    assert "# Example 2" in formatted, "Should have multiple examples"
+    assert "## Inputs" in formatted, "Should have input section headers"
+    assert "## Generated_Outputs" in formatted, "Should have output section headers"
+    assert "## Feedback" in formatted, "Should have feedback section headers"
+    assert "### question" in formatted, "Should have nested field headers"
+    assert "### context" in formatted, "Should have nested context headers"
+
+
+def test_dspy_general_proposer_interface():
+    """Test that DSPyGeneralProposer implements ProposalFn interface correctly."""
+    from dspy.teleprompt.gepa.gepa_utils import ReflectiveExample
+    from dspy.teleprompt.gepa.instruction_proposal import DSPyGeneralProposer
+
+    proposer = DSPyGeneralProposer()
+
+    # Test interface compliance
+    candidate = {"answer_module": "Answer the question based on context."}
+    reflective_dataset: dict[str, list[ReflectiveExample]] = {
+        "answer_module": [
+            {
+                "Inputs": {"question": "Test question", "context": "Test context"},
+                "Generated_Outputs": {"answer": "Test answer"},
+                "Feedback": "Test feedback"
+            }
+        ]
+    }
+    components_to_update = ["answer_module"]
+
+    # Should not raise an exception for interface compliance
+    assert callable(proposer), "Proposer should be callable"
+    assert callable(proposer), "Should implement __call__ method"
+
+    # Test simple initialization (matching GEPA core simplicity)
+    proposer2 = DSPyGeneralProposer()
+    assert proposer2.proposer is not None, "Should have proposer module"
+
+
+def test_general_proposer_with_gepa():
+    """Test integration of general proposer with GEPA."""
+    from dspy.teleprompt.gepa.instruction_proposal import DSPyGeneralProposer
+
+    student = dspy.Predict("question, context -> answer")
+
+    examples = [
+        dspy.Example(
+            question="What is the capital of France?",
+            context="France is a country in Europe.",
+            answer="Paris"
+        ).with_inputs("question", "context"),
+        dspy.Example(
+            question="What is the capital of Spain?",
+            context="Spain is located in southwestern Europe.",
+            answer="Madrid"
+        ).with_inputs("question", "context")
+    ]
+
+    lm = DummyLM([
+        {"answer": "London"},  # Incorrect first
+        {"answer": "Paris"},   # Correct after optimization
+        {"answer": "Barcelona"},  # Incorrect first
+        {"answer": "Madrid"},  # Correct after optimization
+        {"answer": "Berlin"},
+        {"answer": "Rome"},
+        {"answer": "Vienna"},
+        {"answer": "Amsterdam"},
+        {"answer": "Brussels"},
+        {"answer": "Prague"}
+    ])
+    dspy.settings.configure(lm=lm)
+
+    reflection_lm = DummyLM([
+        {"improved_instruction": "When answering geography questions about capitals, ensure you correctly identify the capital city of the specified country. For European countries, be especially careful to distinguish between different nations."},
+        {"improved_instruction": "Focus on providing accurate geographical knowledge about European capitals. When given a question about a country's capital, provide the correct capital city name."},
+        {"improved_instruction": "Answer geography questions with factual accuracy. Pay attention to the specific country mentioned and provide its correct capital city."}
+    ])
+
+    # Test with general proposer (simplified interface)
+    gepa = dspy.GEPA(
+        metric=lambda gold, pred, trace=None, pred_name=None, pred_trace=None: 1.0 if pred.answer.lower() in gold.answer.lower() else 0.0,
+        max_metric_calls=4,
+        reflection_lm=reflection_lm,
+        instruction_proposer=DSPyGeneralProposer()
+    )
+
+    result = gepa.compile(student, trainset=examples, valset=examples)
+
+    assert result is not None
+    assert len(lm.history) > 0, "Main LM should have been called"
+    assert len(reflection_lm.history) > 0, "Reflection LM should have been called"

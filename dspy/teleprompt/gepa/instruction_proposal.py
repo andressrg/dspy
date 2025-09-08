@@ -310,3 +310,166 @@ class MultiModalInstructionProposer(ProposalFn):
                 updated_components[component_name] = new_instruction
 
         return updated_components
+
+
+class GenerateImprovedInstruction(dspy.Signature):
+    """I provided an assistant with instructions to perform a task for me, but the assistant's performance needs improvement based on the examples and feedback below.
+
+    Your task is to write a better instruction for the assistant that addresses the specific issues identified in the feedback.
+
+    ## Analysis Steps:
+    1. **Read the inputs carefully** and identify the input format and infer detailed task description about the task I wish to solve with the assistant
+    2. **Read all the assistant responses and corresponding feedback** to understand what went wrong and what worked well
+    3. **Identify domain-specific knowledge** about the task, as this information may not be available to the assistant in the future
+    4. **Look for successful strategies** the assistant may have utilized and include these patterns in the instruction
+    5. **Address specific issues** mentioned in the feedback to prevent similar mistakes
+
+    ## Instruction Requirements:
+    - **Clear task definition** explaining what the assistant needs to accomplish
+    - **Domain-specific knowledge** about concepts, terminology, or relationships relevant to the task
+    - **Successful strategy guidance** for approaches that work well for this type of task
+    - **Error prevention guidance** for common mistakes shown in the feedback
+    - **Precise, actionable language** that helps the assistant perform better
+
+    Focus on creating an instruction that incorporates domain knowledge, successful strategies, and addresses the specific issues shown in the examples."""
+
+    current_instruction = dspy.InputField(
+        desc="The current instruction that was provided to the assistant to perform the task"
+    )
+    examples_with_feedback = dspy.InputField(
+        desc="Task execution examples showing inputs, assistant outputs, and feedback on how the assistant's response could be better. "
+        "Each example contains the task inputs, what the assistant generated, and detailed feedback about the performance. "
+        "Pay special attention to domain-specific knowledge gaps, successful strategies, and error patterns."
+    )
+
+    improved_instruction = dspy.OutputField(
+        desc="The enhanced instruction that addresses the identified issues, incorporates "
+        "domain-specific knowledge, successful strategies, and provides clear actionable guidance. "
+        "Write the complete improved instruction directly."
+    )
+
+
+class GeneralInstructionProposer(dspy.Module):
+    """DSPy-native general instruction proposer.
+    
+    This module provides an alternative to GEPA's default instruction proposer
+    using DSPy's native patterns while preserving the proven methodology:
+    
+    Single-step instruction generation that analyzes feedback and generates
+    improved instructions, matching GEPA core's direct approach.
+    """
+
+    def __init__(self):
+        """Initialize the proposer with single-step generation (matching GEPA core)."""
+        super().__init__()
+        self.generate_instruction = dspy.ChainOfThought(GenerateImprovedInstruction)
+
+    def forward(self, current_instruction: str, reflective_dataset: list[ReflectiveExample]) -> str:
+        """Generate improved instruction based on current instruction and feedback examples.
+        
+        Args:
+            current_instruction: The current instruction that needs improvement
+            reflective_dataset: List of examples with inputs, outputs, and feedback
+            
+        Returns:
+            str: Improved instruction text
+        """
+        # Format examples using GEPA's proven markdown structure
+        formatted_examples = self._format_examples_for_instruction_generation(reflective_dataset)
+
+        # Direct generation (matching GEPA core's single-step approach)
+        result = self.generate_instruction(
+            current_instruction=current_instruction,
+            examples_with_feedback=formatted_examples
+        )
+
+        return result.improved_instruction
+
+    def _format_examples_for_instruction_generation(self, reflective_dataset: list[ReflectiveExample]) -> str:
+        """Format examples using GEPA's proven markdown structure.
+        
+        This method replicates the exact formatting logic from GEPA's default proposer,
+        ensuring compatibility and maintaining the proven effectiveness.
+        """
+
+        def render_value(value, level=3):
+            """Render values with hierarchical markdown structure."""
+            if isinstance(value, dict):
+                s = ""
+                for k, v in value.items():
+                    s += f"{'#' * level} {k}\n"
+                    s += render_value(v, min(level + 1, 6))
+                if not value:
+                    s += "\n"
+                return s
+            elif isinstance(value, (list, tuple)):
+                s = ""
+                for i, item in enumerate(value):
+                    s += f"{'#' * level} Item {i + 1}\n"
+                    s += render_value(item, min(level + 1, 6))
+                if not value:
+                    s += "\n"
+                return s
+            else:
+                return f"{str(value).strip()}\n\n"
+
+        def convert_sample_to_markdown(sample, example_num):
+            """Convert a single example to markdown format."""
+            s = f"# Example {example_num}\n"
+            for key, val in sample.items():
+                s += f"## {key}\n"
+                s += render_value(val, level=3)
+            return s
+
+        formatted_parts = []
+        for i, example_data in enumerate(reflective_dataset):
+            formatted_example = convert_sample_to_markdown(example_data, i + 1)
+            formatted_parts.append(formatted_example)
+
+        return "\n\n".join(formatted_parts)
+
+
+class DSPyGeneralProposer(ProposalFn):
+    """GEPA-compatible DSPy general instruction proposer.
+    
+    This class implements the ProposalFn protocol using DSPy components,
+    providing a native alternative to GEPA's default proposer while maintaining
+    the same single-step methodology and proven effectiveness.
+    """
+
+    def __init__(self):
+        """Initialize the proposer (matching GEPA core's simplicity)."""
+        self.proposer = GeneralInstructionProposer()
+
+    def __call__(
+        self,
+        candidate: dict[str, str],
+        reflective_dataset: dict[str, list[ReflectiveExample]],
+        components_to_update: list[str],
+    ) -> dict[str, str]:
+        """GEPA-compatible proposal function.
+        
+        Args:
+            candidate: Current component name -> instruction mapping
+            reflective_dataset: Component name -> list of reflective examples  
+            components_to_update: List of component names to update
+            
+        Returns:
+            dict: Component name -> new instruction mapping
+        """
+        updated_components = {}
+
+        for component_name in components_to_update:
+            if component_name in candidate and component_name in reflective_dataset:
+                current_instruction = candidate[component_name]
+                component_reflective_data = reflective_dataset[component_name]
+
+                # Direct generation (matching GEPA core's single-step approach)
+                new_instruction = self.proposer(
+                    current_instruction=current_instruction,
+                    reflective_dataset=component_reflective_data
+                )
+
+                updated_components[component_name] = new_instruction
+
+        return updated_components
